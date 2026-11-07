@@ -1,0 +1,26 @@
+{
+  "name": "rovotest-agentic-playwright-orchestrator",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shyamkl/RovoTest-Agentic-Playwright-Orchestrator.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/shyamkl/RovoTest-Agentic-Playwright-Orchestrator/issues"
+  },
+  "homepage": "https://github.com/shyamkl/RovoTest-Agentic-Playwright-Orchestrator#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.65.0",
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}
