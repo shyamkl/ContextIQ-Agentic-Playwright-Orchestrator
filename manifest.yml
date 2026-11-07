@@ -1,0 +1,31 @@
+modules:
+  jira:issuePanel:
+    - key: rovotest-issue-panel
+      title: RovoTest Dashboard
+      icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
+      resource: main
+      render: native
+      resolver:
+        function: resolver-fn
+  function:
+    - key: resolver-fn
+      handler: index.handler
+
+resources:
+  - key: main
+    path: src/frontend/index.jsx
+
+permissions:
+  scopes:
+    - read:jira-work
+    - write:jira-work
+  external:
+    fetch:
+      backend:
+        - address: api.github.com
+        - address: "*.githubusercontent.com"
+
+app:
+  id: ari:cloud:ecosystem::app/REPLACE-WITH-YOUR-APP-ID
+  runtime:
+    name: nodejs22.x
