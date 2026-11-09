@@ -1,0 +1,34 @@
+name: ContextIQ Automated Playwright Validation Runner
+
+on:
+  repository_dispatch:
+    types: [trigger-playwright-validation]
+
+jobs:
+  run-automation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code Tree
+        uses: actions/checkout@v4
+
+      - name: Initialize Node.js Environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Project Dependencies
+        run: npm ci
+
+      - name: Install System-Level Playwright Browsers
+        run: npx playwright install --with-deps
+
+      - name: Execute Cross-Browser Regression Suites
+        run: npx playwright test
+
+      - name: Archive Test Automation Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
