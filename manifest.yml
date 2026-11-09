@@ -1,8 +1,8 @@
 modules:
   jira:issuePanel:
-    - key: rovotest-issue-panel
-      title: RovoTest Dashboard
-      icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
+    - key: contextiq-issue-panel
+      title: ContextIQ Dashboard
+      icon: https://atlassian.com
       resource: main
       render: native
       resolver:
@@ -10,19 +10,26 @@ modules:
   function:
     - key: resolver-fn
       handler: index.handler
+    - key: jira-trigger-fn
+      handler: index.handleJiraTrigger
+      events:
+        - name: avi:jira:updated:issue
 
 resources:
   - key: main
     path: src/frontend/index.jsx
 
 permissions:
+  store:
+    - read:graph
   scopes:
     - read:jira-work
     - write:jira-work
+    - manage:jira-configuration
   external:
     fetch:
       backend:
-        - address: api.github.com
+        - address: ://github.com
         - address: "*.githubusercontent.com"
 
 app:

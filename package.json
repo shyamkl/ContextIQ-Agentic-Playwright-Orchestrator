@@ -22,5 +22,10 @@
     "@playwright/test": "^1.65.0",
     "@types/node": "^26.6.6",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@forge/api": "^8.5.0",
+    "@forge/react": "^12.5.0",
+    "@forge/resolver": "^2.0.2"
   }
 }
