@@ -1,242 +1,203 @@
-/**
- * RovoTest: Agentic Playwright Orchestrator - Backend
- * File: src/backend/index.js
- *
- * REQUIRED manifest.yml wiring for this file:
- *
- * modules:
- *   trigger:
- *     - key: ready-for-testing-trigger
- *       function: ready-for-testing-fn
- *       events:
- *         - avi:jira:updated:issue
- *   function:
- *     - key: resolver-fn
- *       handler: backend/index.handler
- *     - key: ready-for-testing-fn
- *       handler: backend/index.onIssueTransition
- * permissions:
- *   scopes:
- *     - read:jira-work
- *     - write:jira-work
- *     - storage:app
- *   external:
- *     fetch:
- *       backend:
- *         - address: api.github.com
- *
- * REQUIRED encrypted environment variables (set per environment):
- *   forge variables set --encrypt GITHUB_TOKEN <fine-grained PAT with repo "Contents: write">
- *   forge variables set GITHUB_OWNER <org-or-user>
- *   forge variables set GITHUB_REPO <repository-name>
- *   forge variables set PLAYWRIGHT_SUITE "Checkout Flow - Cross-Browser"   (optional)
- */
-
 import Resolver from '@forge/resolver';
-import api, { fetch, route } from '@forge/api';
-import { kvs } from '@forge/kvs';
-import { randomUUID } from 'crypto';
+import { fetch } from '@forge/api';
+import { sql } from '@forge/sql';
+import { timingSafeEqual } from 'crypto';
 
-/* ---------- Constants ---------- */
-
-const TARGET_STATUS = 'Ready for Testing';
-const DISPATCH_EVENT_TYPE = 'rovotest-run';
 const GITHUB_API_BASE = 'https://api.github.com';
-const GITHUB_API_VERSION = '2022-11-28';
-const MAX_STORED_RUNS = 20;
-
-const runsKey = (issueKey) => `rovotest:runs:${issueKey}`;
-const summaryKey = (issueKey) => `rovotest:ai-summary:${issueKey}`;
-
-/* ---------- Database layer (Forge KVS) ---------- */
-
-const loadRuns = async (issueKey) => (await kvs.get(runsKey(issueKey))) || [];
-
-const loadAiSummary = async (issueKey) =>
-  (await kvs.get(summaryKey(issueKey))) ||
-  'No AI-agent feedback has been recorded for this issue yet. Move the issue to **Ready for Testing** to trigger a Playwright run.';
-
-const saveRun = async (issueKey, run) => {
-  const existing = await loadRuns(issueKey);
-  const updated = [run, ...existing].slice(0, MAX_STORED_RUNS);
-  await kvs.set(runsKey(issueKey), updated);
-  return updated;
-};
-
-const deriveLatestStatus = (runs) => (runs.length > 0 ? runs[0].status : 'QUEUED');
-
-/* ---------- Resolver: consumed by the Forge UI Kit frontend ---------- */
-/* Registered in manifest.yml as function key "resolver-fn" -> backend/index.handler */
+const DISPATCH_EVENT_TYPE = 'trigger-playwright-validation';
+const REQUEST_TIMEOUT_MS = 15000;
 
 const resolver = new Resolver();
 
-resolver.define('getTestResults', async ({ context }) => {
-  const issueKey = context?.extension?.issue?.key;
-
-  if (!issueKey) {
-    return {
-      success: false,
-      error: 'Issue context is unavailable. This resolver must be called from a Jira issue panel.',
-      latestStatus: 'QUEUED',
-      runs: [],
-      aiFeedbackMarkdown: '',
-    };
-  }
-
+/**
+ * Frontend resolver: returns all Playwright test runs, newest first.
+ */
+resolver.define('getTestResults', async () => {
   try {
-    const [runs, aiFeedbackMarkdown] = await Promise.all([
-      loadRuns(issueKey),
-      loadAiSummary(issueKey),
-    ]);
-
-    return {
-      success: true,
-      issueKey,
-      latestStatus: deriveLatestStatus(runs),
-      runs,
-      aiFeedbackMarkdown,
-    };
+    const result = await sql
+      .prepare('SELECT * FROM test_runs ORDER BY execution_time DESC')
+      .execute();
+    return result.rows ?? [];
   } catch (error) {
-    console.error(`getTestResults failed for ${issueKey}:`, error);
-    return {
-      success: false,
-      error: 'Unable to load test results from storage.',
-      latestStatus: 'QUEUED',
-      runs: [],
-      aiFeedbackMarkdown: '',
-    };
+    console.error('getTestResults: SQL query failed:', error?.message || error);
+    throw new Error('Unable to retrieve test results at this time.');
   }
 });
 
 export const handler = resolver.getDefinitions();
 
-/* ---------- GitHub Actions repository_dispatch ---------- */
+/**
+ * Jira issue-updated trigger (manifest function: handleJiraTrigger).
+ * Fires a GitHub repository_dispatch event to start Playwright validation.
+ */
+export async function handleJiraTrigger(event, context) {
+  const token = process.env.GITHUB_TOKEN;
+  const owner = process.env.GITHUB_OWNER;
+  const repo = process.env.GITHUB_REPO;
 
-const dispatchPlaywrightRun = async ({ issueKey, issueId, runId, fromStatus, toStatus }) => {
-  const { GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO } = process.env;
+  const missing = [
+    ['GITHUB_TOKEN', token],
+    ['GITHUB_OWNER', owner],
+    ['GITHUB_REPO', repo],
+  ]
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
 
-  if (!GITHUB_TOKEN || !GITHUB_OWNER || !GITHUB_REPO) {
-    throw new Error(
-      'Missing GITHUB_TOKEN, GITHUB_OWNER or GITHUB_REPO. Set them with "forge variables set".'
-    );
+  if (missing.length > 0) {
+    console.error(`handleJiraTrigger: missing environment variables: ${missing.join(', ')}`);
+    return { success: false, error: 'Missing required configuration.' };
   }
 
-  const response = await fetch(
-    `${GITHUB_API_BASE}/repos/${GITHUB_OWNER}/${GITHUB_REPO}/dispatches`,
-    {
+  const issue = event?.issue ?? {};
+  const payload = {
+    event_type: DISPATCH_EVENT_TYPE,
+    client_payload: {
+      issueKey: issue.key ?? null,
+      issueId: issue.id ?? null,
+      projectKey: issue.fields?.project?.key ?? null,
+      status: issue.fields?.status?.name ?? null,
+      changelog: event?.changelog?.items ?? [],
+      eventType: event?.eventType ?? null,
+      triggeredAt: new Date().toISOString(),
+    },
+  };
+
+  const url = `${GITHUB_API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/dispatches`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
-        'X-GitHub-Api-Version': GITHUB_API_VERSION,
+        Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'ContextIQ-Playwright-Orchestrator',
       },
-      body: JSON.stringify({
-        event_type: DISPATCH_EVENT_TYPE,
-        client_payload: {
-          runId,
-          issueKey,
-          issueId,
-          fromStatus,
-          toStatus,
-          trigger: 'jira-transition',
-        },
-      }),
-    }
-  );
-
-  // GitHub responds with 204 No Content when the dispatch is accepted.
-  if (response.status !== 204) {
-    const details = await response.text();
-    throw new Error(`GitHub dispatch failed (${response.status}): ${details}`);
-  }
-};
-
-const postIssueComment = async (issueKey, message) => {
-  const response = await api.asApp().requestJira(route`/rest/api/3/issue/${issueKey}/comment`, {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      body: {
-        type: 'doc',
-        version: 1,
-        content: [
-          {
-            type: 'paragraph',
-            content: [{ type: 'text', text: message }],
-          },
-        ],
-      },
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Jira comment failed (${response.status}): ${await response.text()}`);
-  }
-};
-
-/* ---------- Jira trigger: fires when an issue is updated ---------- */
-/* Registered in manifest.yml as function key "ready-for-testing-fn" -> backend/index.onIssueTransition */
-
-export const onIssueTransition = async (event) => {
-  const issueKey = event?.issue?.key;
-  const issueId = event?.issue?.id;
-  const changeItems = event?.changelog?.items || [];
-
-  const statusChange = changeItems.find(
-    (item) =>
-      item.field === 'status' &&
-      typeof item.toString === 'string' &&
-      item.toString.trim().toLowerCase() === TARGET_STATUS.toLowerCase()
-  );
-
-  // Ignore every update that is not a transition into "Ready for Testing".
-  if (!issueKey || !statusChange) {
-    return { triggered: false };
-  }
-
-  const runId = `run-${randomUUID()}`;
-  const startedAt = new Date().toISOString();
-  const baseRun = {
-    id: runId,
-    suite: process.env.PLAYWRIGHT_SUITE || 'Playwright E2E Suite',
-    trigger: 'Jira Transition',
-    executedAt: startedAt,
-    duration: '-',
-  };
-
-  try {
-    await dispatchPlaywrightRun({
-      issueKey,
-      issueId,
-      runId,
-      fromStatus: statusChange.fromString,
-      toStatus: statusChange.toString,
+      body: JSON.stringify(payload),
+      signal: controller.signal,
     });
 
-    await saveRun(issueKey, { ...baseRun, status: 'RUNNING' });
-
-    try {
-      await postIssueComment(
-        issueKey,
-        `RovoTest: Playwright run ${runId} was dispatched to GitHub Actions after this issue moved to "${TARGET_STATUS}".`
-      );
-    } catch (commentError) {
-      // A failed comment must never mask a successful dispatch.
-      console.error(`Could not comment on ${issueKey}:`, commentError);
+    // GitHub returns 204 No Content on successful dispatch.
+    if (response.status !== 204) {
+      const detail = await response.text();
+      console.error(`handleJiraTrigger: GitHub dispatch failed (${response.status}): ${detail}`);
+      return { success: false, status: response.status };
     }
 
-    return { triggered: true, runId };
+    console.log(`handleJiraTrigger: dispatched '${DISPATCH_EVENT_TYPE}' for issue ${issue.key ?? 'unknown'}`);
+    return { success: true, status: response.status };
   } catch (error) {
-    console.error(`Playwright dispatch failed for ${issueKey}:`, error);
-
-    await saveRun(issueKey, { ...baseRun, status: 'FAILED' }).catch((storageError) =>
-      console.error('Could not persist failed run:', storageError)
-    );
-
-    return { triggered: false, error: error.message };
+    console.error('handleJiraTrigger: request error:', error?.message || error);
+    return { success: false, error: 'GitHub dispatch request failed.' };
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+const jsonResponse = (statusCode, body) => ({
+  statusCode,
+  headers: { 'Content-Type': ['application/json'] },
+  body: JSON.stringify(body),
+});
+
+const readHeader = (headers, name) => {
+  if (!headers) return undefined;
+  const key = Object.keys(headers).find((k) => k.toLowerCase() === name.toLowerCase());
+  if (!key) return undefined;
+  const value = headers[key];
+  return Array.isArray(value) ? value[0] : value;
 };
+
+const safeEqual = (a, b) => {
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
+};
+
+/**
+ * Web trigger (manifest function: handlePlaywrightCallback).
+ * Receives completed Playwright results from GitHub Actions and persists them to test_runs.
+ *
+ * Expected POST JSON body:
+ *   { jiraIssueKey, suiteName, browser, durationMs, status, aiSummaryReport }
+ *
+ * Assumed test_runs columns:
+ *   jira_issue_key, suite_name, browser, duration_ms, status, ai_summary_report, execution_time
+ *
+ * Auth: requests must send the shared secret in the 'x-callback-token' header,
+ * matching process.env.CALLBACK_SECRET.
+ */
+export async function handlePlaywrightCallback(request) {
+  if (request?.method && request.method.toUpperCase() !== 'POST') {
+    return jsonResponse(405, { error: 'Method not allowed. Use POST.' });
+  }
+
+  const expectedSecret = process.env.CALLBACK_SECRET;
+  if (!expectedSecret) {
+    console.error('handlePlaywrightCallback: CALLBACK_SECRET is not configured.');
+    return jsonResponse(500, { error: 'Server configuration error.' });
+  }
+
+  const providedSecret = readHeader(request?.headers, 'x-callback-token');
+  if (!providedSecret || !safeEqual(providedSecret, expectedSecret)) {
+    console.warn('handlePlaywrightCallback: rejected request with invalid or missing token.');
+    return jsonResponse(401, { error: 'Unauthorized.' });
+  }
+
+  let data;
+  try {
+    data = typeof request.body === 'string' ? JSON.parse(request.body) : request.body;
+  } catch (error) {
+    return jsonResponse(400, { error: 'Request body must be valid JSON.' });
+  }
+
+  if (!data || typeof data !== 'object') {
+    return jsonResponse(400, { error: 'Request body must be a JSON object.' });
+  }
+
+  const { jiraIssueKey, suiteName, browser, durationMs, status, aiSummaryReport } = data;
+
+  const requiredStrings = { jiraIssueKey, suiteName, browser, status };
+  const invalid = Object.entries(requiredStrings)
+    .filter(([, value]) => typeof value !== 'string' || value.trim() === '')
+    .map(([name]) => name);
+
+  const duration = Number(durationMs);
+  if (!Number.isFinite(duration) || duration < 0) invalid.push('durationMs');
+
+  if (aiSummaryReport !== undefined && aiSummaryReport !== null && typeof aiSummaryReport !== 'string') {
+    invalid.push('aiSummaryReport');
+  }
+
+  if (invalid.length > 0) {
+    return jsonResponse(400, { error: `Invalid or missing fields: ${invalid.join(', ')}` });
+  }
+
+  try {
+    await sql
+      .prepare(
+        `INSERT INTO test_runs
+           (jira_issue_key, suite_name, browser, duration_ms, status, ai_summary_report, execution_time)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())`
+      )
+      .bindParams(
+        jiraIssueKey.trim(),
+        suiteName.trim(),
+        browser.trim(),
+        Math.round(duration),
+        status.trim(),
+        aiSummaryReport ?? null
+      )
+      .execute();
+
+    console.log(`handlePlaywrightCallback: stored result for ${jiraIssueKey} (${suiteName}/${browser}, ${status}).`);
+    return jsonResponse(201, { success: true });
+  } catch (error) {
+    console.error('handlePlaywrightCallback: SQL insert failed:', error?.message || error);
+    return jsonResponse(500, { error: 'Failed to store test results.' });
+  }
+}
