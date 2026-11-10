@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ForgeReconciler, {
   Box,
+  Button,
   DynamicTable,
   Expand,
   Heading,
@@ -91,11 +92,11 @@ const AiSummary = ({ run, index }) => {
   }`;
 
   return (
-    <Expand title={`AI Summary: ${title}`}>
+    <Expand title={`Automated Run Summary: ${title}`}>
       {report ? (
         <Text>{report}</Text>
       ) : (
-        <Text>No AI summary report is available for this run.</Text>
+        <Text>No automated run summary is available for this run.</Text>
       )}
     </Expand>
   );
@@ -105,91 +106,123 @@ const App = () => {
   const [testRuns, setTestRuns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const isMounted = useRef(false);
+
+  const fetchTestResults = useCallback(async (
+    initialLoad = false,
+    isActive = () => isMounted.current
+  ) => {
+    if (initialLoad) {
+      setLoading(true);
+    } else {
+      setRefreshing(true);
+    }
+    setError(null);
+
+    try {
+      const response = await invoke('getTestResults');
+
+      if (!isActive()) return;
+
+      if (!Array.isArray(response) && response?.success === false) {
+        throw new Error(
+          response.error || 'Unable to load test results.'
+        );
+      }
+
+      const runs = Array.isArray(response)
+        ? response
+        : Array.isArray(response?.runs)
+        ? response.runs
+        : Array.isArray(response?.testRuns)
+        ? response.testRuns
+        : [];
+
+      setTestRuns(runs);
+    } catch (err) {
+      if (!isActive()) return;
+
+      setError(
+        err?.message || 'Failed to load test results. Please try again later.'
+      );
+    } finally {
+      if (isActive()) {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    }
+  }, []);
 
   useEffect(() => {
-    let isActive = true;
+    let active = true;
+    isMounted.current = true;
 
-    const fetchTestResults = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const response = await invoke('getTestResults');
-        if (!isActive) return;
-
-        const runs = Array.isArray(response)
-          ? response
-          : Array.isArray(response?.testRuns)
-          ? response.testRuns
-          : [];
-        setTestRuns(runs);
-      } catch (err) {
-        if (!isActive) return;
-        setTestRuns([]);
-        setError(
-          err?.message || 'Failed to load test results. Please try again later.'
-        );
-      } finally {
-        if (isActive) setLoading(false);
-      }
-    };
-
-    fetchTestResults();
+    fetchTestResults(true, () => active);
 
     return () => {
-      isActive = false;
+      active = false;
+      isMounted.current = false;
     };
-  }, []);
+  }, [fetchTestResults]);
 
   if (loading) {
     return (
       <Inline space="space.100" alignBlock="center">
         <Spinner size="medium" label="Loading test results" />
-        <Text>Loading test results…</Text>
+        <Text>Loading test results...</Text>
       </Inline>
-    );
-  }
-
-  if (error) {
-    return (
-      <SectionMessage title="Unable to load test results" appearance="error">
-        <Text>{error}</Text>
-      </SectionMessage>
-    );
-  }
-
-  if (testRuns.length === 0) {
-    return (
-      <SectionMessage title="No test runs found" appearance="information">
-        <Text>
-          No Playwright execution results are linked to this issue yet.
-        </Text>
-      </SectionMessage>
     );
   }
 
   return (
     <Stack space="space.200">
       <Heading size="medium">ContextIQ Test Runs</Heading>
-      <DynamicTable
-        head={head}
-        rows={buildRows(testRuns)}
-        rowsPerPage={10}
-        defaultSortKey="suiteName"
-        defaultSortOrder="ASC"
-        emptyView="No test runs available."
-      />
-      <Heading size="small">AI Summary Reports</Heading>
-      <Box>
-        <Stack space="space.100">
-          {testRuns.map((run, index) => (
-            <AiSummary
-              key={String(run?.id ?? `${run?.suite_name ?? 'run'}-${index}`)}
-              run={run}
-              index={index}
-            />
-          ))}
-        </Stack>
-      </Box>
+      <Inline space="space.100" alignBlock="center">
+        <Button
+          appearance="subtle"
+          text={refreshing ? 'Refreshing...' : 'Refresh Results'}
+          disabled={refreshing}
+          onClick={() => fetchTestResults(false)}
+        />
+        {refreshing && <Spinner size="small" label="Refreshing test results" />}
+      </Inline>
+      {error && (
+        <SectionMessage title="Unable to load test results" appearance="error">
+          <Text>{error}</Text>
+        </SectionMessage>
+      )}
+      {testRuns.length === 0 ? (
+        <SectionMessage title="No test runs found" appearance="information">
+          <Text>
+            No Playwright execution results are linked to this issue yet.
+          </Text>
+        </SectionMessage>
+      ) : (
+        <>
+          <DynamicTable
+            head={head}
+            rows={buildRows(testRuns)}
+            rowsPerPage={10}
+            defaultSortKey="suiteName"
+            defaultSortOrder="ASC"
+            emptyView="No test runs available."
+          />
+          <Heading size="small">Automated Run Summaries</Heading>
+          <Box>
+            <Stack space="space.100">
+              {testRuns.map((run, index) => (
+                <AiSummary
+                  key={String(run?.id ?? `${run?.suite_name ?? 'run'}-${index}`)}
+                  run={run}
+                  index={index}
+                />
+              ))}
+            </Stack>
+          </Box>
+        </>
+      )}
     </Stack>
   );
 };

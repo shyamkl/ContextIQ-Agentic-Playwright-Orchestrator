@@ -8,6 +8,13 @@
       resolver:
         function: resolver-fn
 
+  webtrigger:
+    - key: github-result-callback
+      function: gh-result-fn
+      urlFormat: v2
+      response:
+        type: dynamic
+
   trigger:
     - key: jira-trigger
       function: jira-trigger-fn
@@ -19,6 +26,8 @@
       handler: backend/index.handler
     - key: jira-trigger-fn
       handler: backend/index.onIssueTransition
+    - key: gh-result-fn
+      handler: backend/index.handleGithubResult  
 
 resources:
   - key: main
@@ -38,3 +47,4 @@ app:
   id: ari:cloud:ecosystem::app/8cdc26a9-0717-4bb6-8f6f-1ec8cc179d84
   runtime:
     name: nodejs22.x
+
