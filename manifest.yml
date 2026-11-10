@@ -1,4 +1,4 @@
-modules:
+﻿modules:
   jira:issuePanel:
     - key: contextiq-issue-panel
       title: ContextIQ Dashboard
@@ -7,32 +7,34 @@ modules:
       render: native
       resolver:
         function: resolver-fn
+
+  trigger:
+    - key: jira-trigger
+      function: jira-trigger-fn
+      events:
+        - avi:jira:updated:issue
+
   function:
     - key: resolver-fn
-      handler: index.handler
+      handler: backend/index.handler
     - key: jira-trigger-fn
-      handler: index.handleJiraTrigger
-      events:
-        - name: avi:jira:updated:issue
+      handler: backend/index.onIssueTransition
 
 resources:
   - key: main
     path: src/frontend/index.jsx
 
 permissions:
-  store:
-    - read:graph
   scopes:
     - read:jira-work
     - write:jira-work
-    - manage:jira-configuration
+    - storage:app
   external:
     fetch:
       backend:
-        - address: ://github.com
-        - address: "*.githubusercontent.com"
+        - address: api.github.com
 
 app:
-  id: ari:cloud:ecosystem::app/REPLACE-WITH-YOUR-APP-ID
+  id: ari:cloud:ecosystem::app/8cdc26a9-0717-4bb6-8f6f-1ec8cc179d84
   runtime:
     name: nodejs22.x
