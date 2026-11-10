@@ -1,236 +1,198 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import ForgeReconciler, {
   Box,
-  Button,
   DynamicTable,
+  Expand,
   Heading,
   Inline,
   Lozenge,
   SectionMessage,
+  Spinner,
   Stack,
-  Strong,
   Text,
-  xcss,
 } from '@forge/react';
+import { invoke } from '@forge/bridge';
 
-/* ---------- Styling ---------- */
-
-const cardStyles = xcss({
-  backgroundColor: 'elevation.surface',
-  borderColor: 'color.border',
-  borderStyle: 'solid',
-  borderWidth: 'border.width',
-  borderRadius: 'border.radius',
-  padding: 'space.200',
-});
-
-const feedbackStyles = xcss({
-  backgroundColor: 'color.background.neutral',
-  borderColor: 'color.border',
-  borderStyle: 'solid',
-  borderWidth: 'border.width',
-  borderRadius: 'border.radius',
-  padding: 'space.200',
-});
-
-/* ---------- Status helpers ---------- */
-
-const STATUS_CONFIG = {
-  PASSED: { appearance: 'success', label: 'PASSED' },
-  FAILED: { appearance: 'removed', label: 'FAILED' },
-  RUNNING: { appearance: 'inprogress', label: 'RUNNING' },
-  QUEUED: { appearance: 'default', label: 'QUEUED' },
+const STATUS_APPEARANCE = {
+  passed: 'success',
+  pass: 'success',
+  success: 'success',
+  failed: 'removed',
+  fail: 'removed',
+  error: 'removed',
+  running: 'inprogress',
+  in_progress: 'inprogress',
+  pending: 'new',
+  queued: 'new',
+  skipped: 'default',
 };
 
-const StatusLozenge = ({ status, isBold = false }) => {
-  const config = STATUS_CONFIG[status] || STATUS_CONFIG.QUEUED;
-  return (
-    <Lozenge appearance={config.appearance} isBold={isBold}>
-      {config.label}
-    </Lozenge>
-  );
+const getStatusAppearance = (status) =>
+  STATUS_APPEARANCE[String(status ?? '').toLowerCase()] || 'default';
+
+const formatDuration = (value) => {
+  const ms = Number(value);
+  if (value === null || value === undefined || value === '' || Number.isNaN(ms)) {
+    return '—';
+  }
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const totalSeconds = ms / 1000;
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)} s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = Math.round(totalSeconds % 60);
+  return `${minutes}m ${seconds}s`;
 };
-
-/* ---------- Mock data (replace with resolver data via @forge/bridge invoke) ---------- */
-
-const TEST_RUNS = [
-  {
-    id: 'run-1048',
-    suite: 'Checkout Flow - Cross-Browser',
-    trigger: 'Pull Request',
-    executedAt: 'Nov 7, 2026, 1:42 PM',
-    duration: '4m 12s',
-    status: 'RUNNING',
-  },
-  {
-    id: 'run-1047',
-    suite: 'Login & Session Management',
-    trigger: 'Pull Request',
-    executedAt: 'Nov 7, 2026, 11:18 AM',
-    duration: '2m 03s',
-    status: 'FAILED',
-  },
-  {
-    id: 'run-1046',
-    suite: 'Search & Filter Regression',
-    trigger: 'Manual',
-    executedAt: 'Nov 6, 2026, 5:55 PM',
-    duration: '6m 47s',
-    status: 'PASSED',
-  },
-  {
-    id: 'run-1045',
-    suite: 'Account Settings Smoke Suite',
-    trigger: 'Manual',
-    executedAt: 'Nov 6, 2026, 2:30 PM',
-    duration: '1m 29s',
-    status: 'PASSED',
-  },
-  {
-    id: 'run-1044',
-    suite: 'Checkout Flow - Cross-Browser',
-    trigger: 'Pull Request',
-    executedAt: 'Nov 5, 2026, 9:12 AM',
-    duration: '4m 40s',
-    status: 'PASSED',
-  },
-];
-
-const AI_FEEDBACK_MARKDOWN = [
-  '**Run:** `run-1047` - Login & Session Management',
-  '**Agent verdict:** 2 DOM mismatches and 1 layout regression detected across 3 of 14 test cases.',
-  '',
-  '### DOM Element Mismatches',
-  '- **Locator not found:** `button[data-testid="login-submit"]` - the element was renamed to `button[data-testid="auth-submit"]` in the latest commit.',
-  '- **Accessibility role changed:** the `Remember me` checkbox now renders as a `switch` instead of a `checkbox`, breaking `getByRole("checkbox")`.',
-  '',
-  '### Layout Mismatches',
-  '- **Viewport 375px:** the error banner overlaps the password field by roughly **18px**, so the field is not clickable.',
-  '',
-  '### Suggested Fixes',
-  '1. Update the submit-button locator to the new `data-testid`.',
-  '2. Switch the `Remember me` assertion to `getByRole("switch")`.',
-  '3. Review the mobile CSS for `.auth-error-banner` positioning.',
-].join('\n');
-
-/* ---------- Table definition ---------- */
 
 const head = {
   cells: [
-    { key: 'suite', content: 'Test Suite Name', isSortable: true },
-    { key: 'trigger', content: 'Trigger Type', isSortable: true },
-    { key: 'time', content: 'Execution Time', isSortable: true },
-    { key: 'status', content: 'Status' },
+    { key: 'suiteName', content: 'Test Suite Name', isSortable: true },
+    { key: 'browser', content: 'Browser', isSortable: true },
+    { key: 'duration', content: 'Duration', isSortable: true },
+    { key: 'status', content: 'Run Status', isSortable: true },
   ],
 };
 
-const buildRows = (runs) =>
-  runs.map((run) => ({
-    key: run.id,
-    cells: [
-      { key: `${run.id}-suite`, content: <Strong>{run.suite}</Strong> },
-      {
-        key: `${run.id}-trigger`,
-        content: (
-          <Lozenge appearance={run.trigger === 'Pull Request' ? 'new' : 'default'}>
-            {run.trigger}
-          </Lozenge>
-        ),
-      },
-      {
-        key: `${run.id}-time`,
-        content: `${run.executedAt} (${run.duration})`,
-      },
-      { key: `${run.id}-status`, content: <StatusLozenge status={run.status} /> },
-    ],
-  }));
+const buildRows = (testRuns) =>
+  testRuns.map((run, index) => {
+    const key = String(run?.id ?? `${run?.suite_name ?? 'run'}-${index}`);
+    const status = run?.status ?? 'unknown';
+    return {
+      key,
+      cells: [
+        {
+          key: `suite-${key}`,
+          content: <Text>{run?.suite_name ?? 'Unnamed suite'}</Text>,
+        },
+        {
+          key: `browser-${key}`,
+          content: <Text>{run?.browser ?? '—'}</Text>,
+        },
+        {
+          key: `duration-${key}`,
+          content: <Text>{formatDuration(run?.duration_ms ?? run?.duration)}</Text>,
+        },
+        {
+          key: `status-${key}`,
+          content: (
+            <Lozenge appearance={getStatusAppearance(status)}>
+              {String(status).toUpperCase()}
+            </Lozenge>
+          ),
+        },
+      ],
+    };
+  });
 
-/* ---------- Components ---------- */
-
-const SummaryHeader = ({ runs }) => {
-  const latest = runs[0];
-  const passed = runs.filter((r) => r.status === 'PASSED').length;
-  const failed = runs.filter((r) => r.status === 'FAILED').length;
-  const running = runs.filter((r) => r.status === 'RUNNING').length;
+const AiSummary = ({ run, index }) => {
+  const report =
+    typeof run?.ai_summary_report === 'string' ? run.ai_summary_report.trim() : '';
+  const title = `${run?.suite_name ?? `Run ${index + 1}`}${
+    run?.browser ? ` (${run.browser})` : ''
+  }`;
 
   return (
-    <Box xcss={cardStyles}>
-      <Stack space="space.150">
-        <Inline space="space.150" alignBlock="center" spread="space-between">
-          <Stack space="space.050">
-            <Heading size="large">RovoTest: Agentic Playwright Orchestrator</Heading>
-            <Text>Latest run: {latest.suite}</Text>
-          </Stack>
-          <Inline space="space.100" alignBlock="center">
-            <Text>Latest execution state</Text>
-            <StatusLozenge status={latest.status} isBold />
-          </Inline>
-        </Inline>
-        <Inline space="space.200" alignBlock="center">
-          <Inline space="space.075" alignBlock="center">
-            <Lozenge appearance="success">{passed} Passed</Lozenge>
-          </Inline>
-          <Inline space="space.075" alignBlock="center">
-            <Lozenge appearance="removed">{failed} Failed</Lozenge>
-          </Inline>
-          <Inline space="space.075" alignBlock="center">
-            <Lozenge appearance="inprogress">{running} Running</Lozenge>
-          </Inline>
-        </Inline>
-      </Stack>
-    </Box>
+    <Expand title={`AI Summary: ${title}`}>
+      {report ? (
+        <Text>{report}</Text>
+      ) : (
+        <Text>No AI summary report is available for this run.</Text>
+      )}
+    </Expand>
   );
 };
 
-const RecentRunsTable = ({ runs }) => (
-  <Stack space="space.100">
-    <Heading size="medium">Recent Test Runs</Heading>
-    <DynamicTable
-      head={head}
-      rows={buildRows(runs)}
-      rowsPerPage={5}
-      defaultPage={1}
-      emptyView="No test runs have been recorded for this issue yet."
-    />
-  </Stack>
-);
+const App = () => {
+  const [testRuns, setTestRuns] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-const AiFeedbackPanel = ({ markdown }) => {
-  const [isExpanded, setIsExpanded] = useState(true);
+  useEffect(() => {
+    let isActive = true;
+
+    const fetchTestResults = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const response = await invoke('getTestResults');
+        if (!isActive) return;
+
+        const runs = Array.isArray(response)
+          ? response
+          : Array.isArray(response?.testRuns)
+          ? response.testRuns
+          : [];
+        setTestRuns(runs);
+      } catch (err) {
+        if (!isActive) return;
+        setTestRuns([]);
+        setError(
+          err?.message || 'Failed to load test results. Please try again later.'
+        );
+      } finally {
+        if (isActive) setLoading(false);
+      }
+    };
+
+    fetchTestResults();
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
+
+  if (loading) {
+    return (
+      <Inline space="space.100" alignBlock="center">
+        <Spinner size="medium" label="Loading test results" />
+        <Text>Loading test results…</Text>
+      </Inline>
+    );
+  }
+
+  if (error) {
+    return (
+      <SectionMessage title="Unable to load test results" appearance="error">
+        <Text>{error}</Text>
+      </SectionMessage>
+    );
+  }
+
+  if (testRuns.length === 0) {
+    return (
+      <SectionMessage title="No test runs found" appearance="information">
+        <Text>
+          No Playwright execution results are linked to this issue yet.
+        </Text>
+      </SectionMessage>
+    );
+  }
 
   return (
-    <Stack space="space.100">
-      <Inline spread="space-between" alignBlock="center">
-        <Heading size="medium">AI-Agent Feedback Summary</Heading>
-        <Button
-          appearance="subtle"
-          onClick={() => setIsExpanded((prev) => !prev)}
-        >
-          {isExpanded ? 'Collapse' : 'Expand'}
-        </Button>
-      </Inline>
-      {isExpanded ? (
-        <Box xcss={feedbackStyles}>
-          <Text>{markdown}</Text>
-        </Box>
-      ) : (
-        <SectionMessage appearance="information">
-          <Text>
-            Feedback is collapsed. Expand to review DOM and layout mismatches caught by the Playwright agent.
-          </Text>
-        </SectionMessage>
-      )}
+    <Stack space="space.200">
+      <Heading size="medium">ContextIQ Test Runs</Heading>
+      <DynamicTable
+        head={head}
+        rows={buildRows(testRuns)}
+        rowsPerPage={10}
+        defaultSortKey="suiteName"
+        defaultSortOrder="ASC"
+        emptyView="No test runs available."
+      />
+      <Heading size="small">AI Summary Reports</Heading>
+      <Box>
+        <Stack space="space.100">
+          {testRuns.map((run, index) => (
+            <AiSummary
+              key={String(run?.id ?? `${run?.suite_name ?? 'run'}-${index}`)}
+              run={run}
+              index={index}
+            />
+          ))}
+        </Stack>
+      </Box>
     </Stack>
   );
 };
-
-const App = () => (
-  <Stack space="space.300">
-    <SummaryHeader runs={TEST_RUNS} />
-    <RecentRunsTable runs={TEST_RUNS} />
-    <AiFeedbackPanel markdown={AI_FEEDBACK_MARKDOWN} />
-  </Stack>
-);
 
 ForgeReconciler.render(
   <React.StrictMode>
