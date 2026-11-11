@@ -24,7 +24,8 @@ jobs:
 
       - name: Execute Cross-Browser Regression Suites
         id: playwright
-        run: npx playwright test --config=tests/playwright.config.ts
+        run: npx playwright test
+
 
       - name: Archive Test Automation Artifacts
         if: always()
