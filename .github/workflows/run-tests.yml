@@ -2,7 +2,7 @@ name: ContextIQ Automated Playwright Validation Runner
 
 on:
   repository_dispatch:
-    types: [trigger-playwright-validation]
+    types: [rovotest-run]
 
 jobs:
   run-automation:
@@ -23,12 +23,138 @@ jobs:
         run: npx playwright install --with-deps
 
       - name: Execute Cross-Browser Regression Suites
-        run: npx playwright test
+        id: playwright
+        run: npx playwright test --config=tests/playwright.config.ts
 
       - name: Archive Test Automation Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
-          path: playwright-report/
+          path: |
+            playwright-report/
+            test-results/
           retention-days: 7
+
+      - name: Send Authenticated Results to Forge
+        if: always()
+        env:
+          CALLBACK_URL: ${{ secrets.FORGE_CALLBACK_URL }}
+          CALLBACK_SECRET: ${{ secrets.FORGE_CALLBACK_SECRET }}
+          RUN_ID: ${{ github.event.client_payload.runId }}
+          ISSUE_KEY: ${{ github.event.client_payload.issueKey }}
+          RUN_OUTCOME: ${{ steps.playwright.outcome }}
+          REPORT_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          node <<'NODE'
+          const { createHmac } = require('node:crypto');
+          const fs = require('node:fs');
+
+          async function main() {
+            const {
+              CALLBACK_URL,
+              CALLBACK_SECRET,
+              RUN_ID,
+              ISSUE_KEY,
+              RUN_OUTCOME,
+              REPORT_URL,
+            } = process.env;
+
+            if (!CALLBACK_URL || !CALLBACK_SECRET || !RUN_ID || !ISSUE_KEY) {
+              throw new Error('Callback configuration or dispatch identifiers are missing.');
+            }
+
+            let stats = {};
+            let reportWarning = '';
+
+            try {
+              const report = JSON.parse(
+                fs.readFileSync('test-results/results.json', 'utf8')
+              );
+              stats = report.stats || {};
+            } catch (error) {
+              reportWarning = `JSON test report unavailable: ${error.message}`;
+            }
+
+            const expected = Number.isSafeInteger(stats.expected) ? stats.expected : 0;
+            const unexpected = Number.isSafeInteger(stats.unexpected) ? stats.unexpected : 0;
+            const skipped = Number.isSafeInteger(stats.skipped) ? stats.skipped : 0;
+            const flaky = Number.isSafeInteger(stats.flaky) ? stats.flaky : 0;
+
+            const passedTests = expected + flaky;
+            const failedTests = unexpected;
+            const skippedTests = skipped;
+            const totalTests = passedTests + failedTests + skippedTests;
+
+            const durationMs = Number.isFinite(stats.duration)
+              ? Math.min(Math.max(Math.round(stats.duration), 0), 86400000)
+              : 0;
+
+            const status =
+              RUN_OUTCOME === 'success'
+                ? 'success'
+                : RUN_OUTCOME === 'cancelled'
+                  ? 'cancelled'
+                  : 'failure';
+
+            const aiSummaryMarkdown = [
+              '## Automated Playwright Run Summary',
+              '',
+              `- **Workflow outcome:** ${status}`,
+              `- **Total tests:** ${totalTests}`,
+              `- **Passed:** ${passedTests}`,
+              `- **Failed:** ${failedTests}`,
+              `- **Skipped:** ${skippedTests}`,
+              `- **Flaky:** ${flaky}`,
+              reportWarning ? `- **Report warning:** ${reportWarning}` : '',
+              '',
+              `[View GitHub Actions run](${REPORT_URL})`,
+            ].filter(Boolean).join('\n');
+
+            const payload = {
+              runId: RUN_ID,
+              issueKey: ISSUE_KEY,
+              status,
+              durationMs,
+              suiteName: 'ContextIQ E2E Pipeline',
+              browser: 'Chromium, Firefox, WebKit',
+              totalTests,
+              passedTests,
+              failedTests,
+              skippedTests,
+              aiSummaryMarkdown,
+              reportUrl: REPORT_URL,
+            };
+
+            const rawBody = JSON.stringify(payload);
+            const timestamp = Math.floor(Date.now() / 1000).toString();
+
+            const signature = createHmac('sha256', CALLBACK_SECRET)
+              .update(`${timestamp}.${rawBody}`, 'utf8')
+              .digest('hex');
+
+            const response = await fetch(CALLBACK_URL, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-rovotest-timestamp': timestamp,
+                'x-rovotest-signature': `sha256=${signature}`,
+              },
+              body: rawBody,
+            });
+
+            const responseText = await response.text();
+
+            console.log(`Forge callback HTTP status: ${response.status}`);
+            console.log(`Forge callback response: ${responseText}`);
+
+            if (!response.ok) {
+              throw new Error(`Forge callback failed with HTTP ${response.status}.`);
+            }
+          }
+
+          main().catch((error) => {
+            console.error('Result callback failed:', error.message);
+            process.exitCode = 1;
+          });
+          NODE
